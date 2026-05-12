@@ -1,0 +1,10 @@
+[project]
+name = "flow-autotts"
+version = "0.1.0"
+description = "AutoTTS-style controller discovery for flow-matching samplers."
+readme = "flow_tts_controller_implementation_spec.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
