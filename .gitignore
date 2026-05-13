@@ -6,3 +6,10 @@ __pycache__/
 .ruff_cache/
 outputs/
 checkpoints/
+PickScore_v1/
+logs/
+flow_grpo/
+SD_3.5_med/
+fill_gpu.py
+.cache/
+._____temp/
