@@ -1,0 +1,172 @@
+You are a proposer for AutoTTS-style training-free controller discovery over
+flow-matching test-time scaling.
+
+You are working in the FlowEvo repository. Your job is not to hand-code one
+fixed sampler. Your job is to discover a reusable controller policy that uses
+preview feedback to allocate compute across width, depth, backward refinement,
+pruning, and termination.
+
+Read first, in this order:
+- `flow_tts_controller_implementation_spec.md`
+- `{context_file}`
+- `{method_file}`
+- `flow_autotts/controllers/baselines.py`
+- the compact prior summaries and controller snapshots named in the context pack
+
+Workflow history directory: `{history_dir}`.
+
+Treat the context pack as your context budget. Do not scan the whole repository
+or bulk-load raw logs. Read targeted snippets only when the context pack points
+to a concrete anomaly.
+
+## Controller Contract
+
+Edit only `{method_file}` and implement:
+
+```python
+class OptimalController:
+    def solve(self, env, beta):
+        ...
+```
+
+The file is reset from `flow_autotts/controllers/optimal.template.py` at the
+start of every workflow round, so the proposal must be self-contained.
+
+Use only the public environment API:
+- `env.spawn(n) -> list[int]`
+- `env.forward(particle_id, target_time, solver="euler", cfg=None)`
+- `env.preview(particle_id, mode="clean_anchor", scorer="default")`
+- `env.backward(anchor_id, target_time, noise_policy="fresh_noise", num_children=1, mask=None, strength=1.0)`
+- `env.prune(particle_ids) -> None`
+- `env.answer(rule="best_preview_score")`
+- `env.get_state()`
+- public fields: `env.time_grid`, `env.budget`, `env.budget_left`
+
+Hard constraints:
+- terminate by returning `env.answer(...)`;
+- catch `BudgetExceededError` and `InvalidActionError` where useful;
+- do not inspect hidden latents, rewards from future actions, prompt IDs,
+  datasets, model directories, or private environment internals;
+- keep imports light and deterministic.
+
+## Objective
+
+Optimize the reward/NFE Pareto frontier on SD3.5 Medium + PickScore.
+Accuracy/reward is primary, but cost matters at each beta level.
+
+The evaluation sweeps beta. You must improve the controller as a budget family,
+not as a single beta. Larger beta must monotonically mean more willingness to
+spend compute through more width, deeper continuation, more backward children,
+later stopping, stronger confirmation, or less aggressive pruning.
+
+Fair comparison is by comparable NFE. Use the context pack baseline/frontier
+tables to identify where the current controller loses to ODE baseline or prior
+best. A meaningful improvement should target one or more weak budget regions,
+not only preserve the strongest high-beta result.
+
+## AutoTTS Analogy
+
+Think in the same terms as AutoTTS probing:
+- width: how many particles/branches to create;
+- depth: how far each branch is advanced before observing or committing;
+- probe: `preview`, the only semantic observation action;
+- branch/refine: `backward` from preview anchors;
+- prune: remove active particles that no longer deserve compute;
+- answer: finish using the best available preview/active trajectory.
+
+Early previews can be noisy. Late previews are expensive but more reliable.
+Backward creates new candidates around an anchor; it is useful only when the
+anchor selection, target time, noise policy, and confirmation budget are tied to
+observed evidence.
+
+## Required Analysis Before Editing
+
+Before coding, inspect the compact history in `{context_file}` and answer these
+questions for yourself:
+- For each beta/NFE level, what is the latest reward and mean NFE?
+- Which beta levels beat the nearest ODE baseline, and which do not?
+- Did the last two proposal snapshots make a real behavioral change, or only
+  minor threshold/comment changes?
+- Where are actions being spent: early previews, full completions, backward
+  children, pruning, or late confirmations?
+- Which one weakness will this round target?
+
+You may inspect recent controller snapshots named by the context pack. Prefer a
+small targeted diff against the current template/latest snapshot over broad log
+reading.
+
+## Novelty Requirement
+
+This is mandatory. A valid proposal must be behaviorally non-trivial relative to
+the best recent controller and to the seed baselines.
+
+The following do not count as meaningful proposals by themselves:
+- comment-only edits;
+- renaming variables;
+- changing one threshold by a tiny amount;
+- reordering the same fixed stages without changing decisions;
+- copying the previous best controller with only cosmetic cleanup.
+
+If you build on a prior strategy, add a clear new mechanism. Examples of valid
+mechanisms include:
+- adaptive branch allocation from score gaps or uncertainty;
+- explicit weak-budget repair, such as protecting beta=0.25 from losing to ODE;
+- SDE scouts only where stochastic forward motion has a bounded role;
+- ODE/euler fallback when preview evidence is weak;
+- two-stage preview confirmation before backward refinement;
+- score-gap based pruning and late confirmation;
+- beta-dependent noise policy that changes exploration radius and child count;
+- budget-aware stopping that spends only when the expected best-score gap merits it.
+
+Pick one or two mechanisms. Keep the policy simple enough to generalize.
+
+## Beta Schedule Discipline
+
+Implement a clear helper such as `_schedule(beta) -> dict`.
+Every behavior-critical hyperparameter must be a deterministic function of beta.
+Keep the schedule smooth or monotonic wherever it affects budget use.
+
+Recommended shape:
+- beta=0: deterministic ODE/euler anchor behavior, near 10 NFE;
+- low beta: very limited extra previews; must not waste enough compute to lose
+  badly to the nearest ODE baseline;
+- mid beta: adaptive scouts plus selective refinement;
+- high beta: accuracy-first, more conservative pruning, enough diversity and
+  confirmation to spend near the budget ceiling when useful.
+
+Avoid many brittle breakpoints and magic constants. A small number of named
+parameters is better than a large table.
+
+## Implementation Expectations
+
+Design a controller that responds to observations:
+- preview before expensive branching when evidence is needed;
+- compare ranked preview scores, score gaps, uncertainty, time, and active
+  status through public state records;
+- allocate children to the most promising anchors rather than uniformly;
+- prune clear losers after observing them;
+- preserve diversity at high beta so the controller does not collapse onto the
+  first good preview;
+- stop early only when the budget level and preview evidence justify it.
+
+Use `backward` as anchor-based re-noising/refinement, not uncontrolled noise
+spam. If using `solver="sde"`, bound it carefully and explain where it helps.
+
+## Required Checks
+
+Run at least lightweight local checks that do not require the full SD3.5 eval,
+for example:
+- `python -m py_compile {method_file}`
+- a tiny fake-env or targeted dry-run if practical
+
+Do not edit workflow, harness, datasets, model directories, logs, or tests.
+
+## Required Final Response
+
+After editing, respond with:
+- the controller idea;
+- which histories and baseline/frontier rows you inspected;
+- the exact beta schedule and why budget use is monotonic;
+- what is behaviorally new compared with the recent best controller;
+- checks you ran;
+- expected risks and which beta/NFE levels the proposal is meant to improve.
