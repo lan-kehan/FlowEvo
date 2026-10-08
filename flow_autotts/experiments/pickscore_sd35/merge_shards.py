@@ -6,11 +6,10 @@ import argparse
 import copy
 import json
 from pathlib import Path
-from statistics import mean
 from typing import Any, Sequence
 
-from flow_autotts.eval.discovery import build_round_result
-from flow_autotts.experiments.pickscore_sd35.harness import _aggregate_actions
+from flow_autotts.eval.discovery import build_round_result, write_json
+from flow_autotts.eval.metrics import summarize_episodes
 
 
 def merge_histories(paths: Sequence[str | Path], output: str | Path) -> dict[str, Any]:
@@ -45,9 +44,7 @@ def merge_histories(paths: Sequence[str | Path], output: str | Path) -> dict[str
         round_result["controller_key"] = first_round.get("controller_key")
         merged["rounds"].append(round_result)
 
-    target = Path(output)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(merged, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(merged, output)
     return merged
 
 
@@ -63,25 +60,11 @@ def _merge_beta_result(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     if len(ranks) != len(set(ranks)):
         raise ValueError("duplicate sample_rank found while merging shard episodes")
 
-    rewards = [
-        episode["metrics"]["final_reward"]
-        for episode in episodes
-        if episode["metrics"]["final_reward"] is not None
-    ]
-    nfes = [episode["metrics"]["nfe"] for episode in episodes]
-    reward_per_nfes = [
-        episode["metrics"]["reward_per_nfe"]
-        for episode in episodes
-        if episode["metrics"]["reward_per_nfe"] is not None
-    ]
     return {
         "beta": beta,
         "num_samples": len(episodes),
-        "final_reward": mean(rewards) if rewards else None,
-        "nfe": mean(nfes) if nfes else 0.0,
-        "reward_per_nfe": mean(reward_per_nfes) if reward_per_nfes else None,
+        **summarize_episodes(episodes),
         "episodes": episodes,
-        "action_statistics": _aggregate_actions(episodes),
     }
 
 

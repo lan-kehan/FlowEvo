@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 from typing import Sequence
 
 from flow_autotts.controllers import (
@@ -16,7 +15,7 @@ from flow_autotts.controllers import (
     SelfRefineController,
 )
 from flow_autotts.core.env import FlowTTSEnv
-from flow_autotts.eval.discovery import build_round_result, write_history
+from flow_autotts.eval.discovery import build_round_result, write_json
 from flow_autotts.eval.runner import beta_sweep
 from flow_autotts.experiments.eight_gaussians.model import (
     EightGaussiansFlowModel,
@@ -72,7 +71,7 @@ def run_harness(
         beta_sweep_results=results,
     )
     if output is not None:
-        write_history(round_result, Path(output))
+        write_json(round_result, output)
     return round_result
 
 

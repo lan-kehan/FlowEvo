@@ -6,7 +6,6 @@ import argparse
 import json
 from dataclasses import asdict
 from pathlib import Path
-from statistics import mean
 from typing import Any, Sequence
 
 from flow_autotts.controllers import (
@@ -18,8 +17,8 @@ from flow_autotts.controllers import (
     SelfRefineController,
 )
 from flow_autotts.controllers.base import Controller
-from flow_autotts.eval.discovery import build_round_result
-from flow_autotts.eval.metrics import compute_metrics, event_log_to_dicts
+from flow_autotts.eval.discovery import build_round_result, write_json
+from flow_autotts.eval.metrics import compute_metrics, event_log_to_dicts, summarize_episodes
 from flow_autotts.experiments.pickscore_sd35.dataset import PromptSample, sample_prompt_file
 from flow_autotts.experiments.pickscore_sd35.env import (
     SD35EnvConfig,
@@ -84,19 +83,19 @@ def run_harness(
     local_files_only: bool = True,
     progress: bool = False,
 ) -> dict[str, Any]:
-    dataset = Path(dataset_dir) if dataset_dir is not None else _default_dataset_dir()
-    model = Path(model_path) if model_path is not None else _default_model_path()
+    dataset = Path(dataset_dir) if dataset_dir is not None else default_dataset_dir()
+    model = Path(model_path) if model_path is not None else default_model_path()
     pickscore_model = (
         Path(pickscore_model_path)
         if pickscore_model_path is not None
-        else _default_pickscore_path()
+        else default_pickscore_path()
     )
     pickscore_processor = (
         Path(pickscore_processor_path)
         if pickscore_processor_path is not None
         else pickscore_model
     )
-    runtime_device = device or _default_device()
+    runtime_device = device or default_device()
     runtime_dtype = dtype or ("bfloat16" if runtime_device.startswith("cuda") else "float32")
 
     all_samples = sample_prompt_file(
@@ -105,21 +104,12 @@ def run_harness(
         sample_size=sample_size,
         seed=sample_seed,
     )
-    sample_ranks = list(range(len(all_samples)))
     if num_shards <= 0:
         raise ValueError("num_shards must be positive")
     if not 0 <= shard_index < num_shards:
         raise ValueError("shard_index must be in [0, num_shards)")
-    if num_shards > 1:
-        ranked = [
-            (rank, sample)
-            for rank, sample in enumerate(all_samples)
-            if rank % num_shards == shard_index
-        ]
-        sample_ranks = [rank for rank, _sample in ranked]
-        samples = [sample for _rank, sample in ranked]
-    else:
-        samples = all_samples
+    sample_ranks = [rank for rank in range(len(all_samples)) if rank % num_shards == shard_index]
+    samples = [all_samples[rank] for rank in sample_ranks]
     env_config = SD35EnvConfig(
         resolution=resolution,
         num_steps=num_steps,
@@ -194,10 +184,10 @@ def run_harness(
         history["rounds"].append(round_result)
 
         if output is not None:
-            _write_json(history, output)
+            write_json(history, output)
 
     if output is not None:
-        _write_json(history, output)
+        write_json(history, output)
     return history
 
 
@@ -246,25 +236,11 @@ def evaluate_controller_on_samples(
         if str(resources.device).startswith("cuda") and hasattr(resources.torch, "cuda"):
             resources.torch.cuda.empty_cache()
 
-    rewards = [
-        episode["metrics"]["final_reward"]
-        for episode in episodes
-        if episode["metrics"]["final_reward"] is not None
-    ]
-    nfes = [episode["metrics"]["nfe"] for episode in episodes]
-    reward_per_nfes = [
-        episode["metrics"]["reward_per_nfe"]
-        for episode in episodes
-        if episode["metrics"]["reward_per_nfe"] is not None
-    ]
     return {
         "beta": float(beta),
         "num_samples": len(samples),
-        "final_reward": mean(rewards) if rewards else None,
-        "nfe": mean(nfes) if nfes else 0.0,
-        "reward_per_nfe": mean(reward_per_nfes) if reward_per_nfes else None,
+        **summarize_episodes(episodes),
         "episodes": episodes,
-        "action_statistics": _aggregate_actions(episodes),
     }
 
 
@@ -291,22 +267,6 @@ def compact_summary(history: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _aggregate_actions(episodes: list[dict[str, Any]]) -> dict[str, float]:
-    if not episodes:
-        return {}
-    totals: dict[str, int] = {}
-    total_nfe = 0
-    for episode in episodes:
-        metrics = episode["metrics"]
-        total_nfe += int(metrics["nfe"])
-        for action, count in metrics["action_counts"].items():
-            totals[action] = totals.get(action, 0) + int(count)
-    return {
-        action.lower(): count / len(episodes)
-        for action, count in sorted(totals.items())
-    } | {"mean_nfe": total_nfe / len(episodes)}
-
-
 def _round_controller_names(rounds: int, controller_names: Sequence[str] | None) -> list[str]:
     if rounds <= 0:
         raise ValueError("rounds must be positive")
@@ -319,25 +279,25 @@ def _round_controller_names(rounds: int, controller_names: Sequence[str] | None)
     return names + [names[-1]] * (rounds - len(names))
 
 
-def _default_dataset_dir() -> Path:
+def default_dataset_dir() -> Path:
     return REPO_ROOT / "flow_grpo" / "dataset" / "pickscore"
 
 
-def _default_model_path() -> Path | str:
+def default_model_path() -> Path | str:
     local_path = REPO_ROOT / "SD_3.5_med"
     return local_path if local_path.exists() else "stabilityai/stable-diffusion-3.5-medium"
 
 
-def _default_pickscore_path() -> Path | str:
+def default_pickscore_path() -> Path | str:
     local_path = REPO_ROOT / "PickScore_v1"
     return local_path if local_path.exists() else "yuvalkirstain/PickScore_v1"
 
 
-def _default_output_path() -> Path:
+def default_output_path() -> Path:
     return REPO_ROOT / "logs" / "flow_autotts" / "pickscore_sd35" / "history.json"
 
 
-def _default_device() -> str:
+def default_device() -> str:
     try:
         import torch
     except ImportError:
@@ -345,15 +305,9 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _write_json(payload: dict[str, Any], output: str | Path) -> None:
-    target = Path(output)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default=str(_default_dataset_dir()))
+    parser.add_argument("--dataset", default=str(default_dataset_dir()))
     parser.add_argument("--split", default="train")
     parser.add_argument("--sample-size", type=int, default=100)
     parser.add_argument("--sample-seed", type=int, default=42)
@@ -363,11 +317,11 @@ def main() -> None:
     parser.add_argument("--controllers", nargs="+", choices=sorted(CONTROLLERS), default=None)
     parser.add_argument("--betas", type=float, nargs="+", default=[0.5])
     parser.add_argument("--budget", type=int, default=64)
-    parser.add_argument("--output", default=str(_default_output_path()))
+    parser.add_argument("--output", default=str(default_output_path()))
     parser.add_argument("--summary-output", default=None)
     parser.add_argument("--compact", action="store_true")
-    parser.add_argument("--model", default=str(_default_model_path()))
-    parser.add_argument("--pickscore-model", default=str(_default_pickscore_path()))
+    parser.add_argument("--model", default=str(default_model_path()))
+    parser.add_argument("--pickscore-model", default=str(default_pickscore_path()))
     parser.add_argument("--pickscore-processor", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--text-encoder-device", default=None)
@@ -416,7 +370,7 @@ def main() -> None:
     )
     summary = compact_summary(history)
     if args.summary_output is not None:
-        _write_json(summary, args.summary_output)
+        write_json(summary, args.summary_output)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

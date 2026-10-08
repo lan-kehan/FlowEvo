@@ -7,7 +7,7 @@ preview feedback to allocate compute across width, depth, backward refinement,
 pruning, and termination.
 
 Read first, in this order:
-- `flow_tts_controller_implementation_spec.md`
+- `docs/controller_spec.md`
 - `{context_file}`
 - `{method_file}`
 - `flow_autotts/controllers/baselines.py`

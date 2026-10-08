@@ -11,15 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flow_autotts.core.errors import BudgetExceededError, InvalidActionError
+from flow_autotts.core.episode import EpisodeBase, preview_uncertainty
+from flow_autotts.core.errors import InvalidActionError
 from flow_autotts.core.state import (
     AnswerRecord,
     ControllerState,
-    EventRecord,
     ParticleSummary,
     PreviewRecord,
 )
-from flow_autotts.experiments.pickscore_sd35.scoring import PickScoreBatchScorer
+from flow_autotts.experiments.pickscore_sd35.scoring import PickScoreBatchScorer, torch_dtype
 
 
 @dataclass(frozen=True)
@@ -68,10 +68,10 @@ class SD35Resources:
         import torch
         from diffusers import StableDiffusion3Pipeline
 
-        torch_dtype = _torch_dtype(torch, dtype)
+        model_dtype = torch_dtype(torch, dtype)
         pipeline = StableDiffusion3Pipeline.from_pretrained(
             str(model_path),
-            torch_dtype=torch_dtype,
+            torch_dtype=model_dtype,
             local_files_only=local_files_only,
         )
         pipeline = pipeline.to(device)
@@ -106,7 +106,7 @@ class SD35Resources:
             device=device,
             text_encoder_device=encoder_device,
             offload_text_encoders_after_encode=bool(offload_text_encoders_after_encode),
-            dtype=torch_dtype,
+            dtype=model_dtype,
             timesteps=pipeline.scheduler.timesteps.detach().clone(),
             sigmas=pipeline.scheduler.sigmas.detach().clone(),
         )
@@ -196,7 +196,7 @@ class _SD35Anchor:
     drift: float
 
 
-class SD35PickScoreEnv:
+class SD35PickScoreEnv(EpisodeBase[_SD35Particle, _SD35Anchor]):
     """Controller environment backed by SD3.5 Medium and PickScore."""
 
     def __init__(
@@ -208,13 +208,11 @@ class SD35PickScoreEnv:
         config: SD35EnvConfig | None = None,
         time_grid: list[float] | tuple[float, ...] | None = None,
     ) -> None:
+        super().__init__(budget)
         self.resources = resources
         self.prompt = str(prompt)
         self.seed = int(seed)
-        self.budget = int(budget)
         self.config = config or SD35EnvConfig()
-        if self.budget < 0:
-            raise ValueError("budget must be non-negative")
         if self.config.num_steps <= 0:
             raise ValueError("num_steps must be positive")
 
@@ -227,22 +225,6 @@ class SD35PickScoreEnv:
             )
         )
         self.latent_shape = self._latent_shape()
-
-        self._particles: dict[int, _SD35Particle] = {}
-        self._anchors: dict[int, _SD35Anchor] = {}
-        self._events: list[EventRecord] = []
-        self._nfe_used = 0
-        self._next_particle_id = 0
-        self._next_anchor_id = 0
-        self._answered = False
-
-    @property
-    def nfe_used(self) -> int:
-        return self._nfe_used
-
-    @property
-    def budget_left(self) -> int:
-        return self.budget - self._nfe_used
 
     def get_state(self) -> ControllerState:
         particles = {
@@ -290,8 +272,7 @@ class SD35PickScoreEnv:
 
         ids: list[int] = []
         for _ in range(int(n)):
-            particle_id = self._next_particle_id
-            self._next_particle_id += 1
+            particle_id = self._new_particle_id()
             generator = self._make_generator(self.seed + particle_id * 104_729)
             latents = self._initial_latents(generator)
             self._particles[particle_id] = _SD35Particle(
@@ -388,11 +369,12 @@ class SD35PickScoreEnv:
         self._charge(1)
         clean_latents, noise_latents = self._clean_and_noise_estimate(particle)
         score, score_dict = self._score_latents(clean_latents) if scorer is not None else (0.0, {})
-        uncertainty = self._preview_uncertainty(particle.step_index, particle.sde_variance)
+        uncertainty = preview_uncertainty(
+            self._step_to_time(particle.step_index), particle.sde_variance
+        )
         drift = self._latent_rmse(clean_latents, particle.latents)
 
-        anchor_id = self._next_anchor_id
-        self._next_anchor_id += 1
+        anchor_id = self._new_anchor_id()
         self._anchors[anchor_id] = _SD35Anchor(
             id=anchor_id,
             particle_id=particle_id,
@@ -446,8 +428,7 @@ class SD35PickScoreEnv:
 
         child_ids: list[int] = []
         for _ in range(int(num_children)):
-            child_id = self._next_particle_id
-            self._next_particle_id += 1
+            child_id = self._new_particle_id()
             generator = self._make_generator(self.seed + child_id * 154_858_63)
             noise = self._noise_for_policy(anchor, noise_policy, strength, generator)
             latents = (1.0 - sigma) * anchor.clean_latents + sigma * noise
@@ -479,22 +460,6 @@ class SD35PickScoreEnv:
             },
         )
         return child_ids
-
-    def prune(self, particle_ids: list[int]) -> None:
-        self._ensure_open()
-        for particle_id in particle_ids:
-            particle = self._require_particle(particle_id)
-            if particle.status == "completed":
-                raise InvalidActionError("cannot prune completed particles")
-            particle.status = "pruned"
-        self._log(
-            action="PRUNE",
-            particle_ids=list(particle_ids),
-            input_time=None,
-            output_time=None,
-            nfe_cost=0,
-            details={"n": len(particle_ids)},
-        )
 
     def answer(self, rule: str = "best_preview_score") -> AnswerRecord:
         self._ensure_open()
@@ -713,11 +678,6 @@ class SD35PickScoreEnv:
     def _step_to_time(self, step_index: int) -> float:
         return float(step_index) / float(self.config.num_steps)
 
-    def _preview_uncertainty(self, step_index: int, sde_variance: float) -> float:
-        base = 1.0 - self._step_to_time(step_index)
-        stochastic = math.sqrt(max(0.0, float(sde_variance)))
-        return max(0.0, min(1.0, base + 0.25 * stochastic))
-
     def _latent_rmse(self, a: Any, b: Any) -> float:
         return float((a.float() - b.float()).pow(2).mean().sqrt().detach().cpu().item())
 
@@ -737,81 +697,6 @@ class SD35PickScoreEnv:
             device=self.resources.device,
             dtype=dtype,
         )
-
-    def _require_particle(self, particle_id: int, status: str | None = None) -> _SD35Particle:
-        try:
-            particle = self._particles[int(particle_id)]
-        except KeyError as exc:
-            raise InvalidActionError(f"unknown particle_id: {particle_id}") from exc
-        if status is not None and particle.status != status:
-            raise InvalidActionError(
-                f"particle {particle_id} has status {particle.status}, expected {status}"
-            )
-        return particle
-
-    def _require_anchor(self, anchor_id: int) -> _SD35Anchor:
-        try:
-            return self._anchors[int(anchor_id)]
-        except KeyError as exc:
-            raise InvalidActionError(f"unknown anchor_id: {anchor_id}") from exc
-
-    def _charge(self, nfe_cost: int) -> None:
-        if self._nfe_used + int(nfe_cost) > self.budget:
-            raise BudgetExceededError(
-                f"action would exceed budget: used {self._nfe_used}, "
-                f"cost {nfe_cost}, budget {self.budget}"
-            )
-        self._nfe_used += int(nfe_cost)
-
-    def _log(
-        self,
-        action: str,
-        particle_ids: list[int],
-        input_time: float | None,
-        output_time: float | None,
-        nfe_cost: int,
-        details: dict[str, Any],
-    ) -> None:
-        self._events.append(
-            EventRecord(
-                step_id=len(self._events),
-                action=action,
-                particle_ids=list(particle_ids),
-                input_time=input_time,
-                output_time=output_time,
-                nfe_cost=int(nfe_cost),
-                budget_left=self.budget_left,
-                details=dict(details),
-            )
-        )
-
-    def _status_lists(self) -> tuple[list[int], list[int], list[int]]:
-        active: list[int] = []
-        completed: list[int] = []
-        pruned: list[int] = []
-        for particle_id, particle in self._particles.items():
-            if particle.status == "active":
-                active.append(particle_id)
-            elif particle.status == "completed":
-                completed.append(particle_id)
-            elif particle.status == "pruned":
-                pruned.append(particle_id)
-        return active, completed, pruned
-
-    def _ensure_open(self) -> None:
-        if self._answered:
-            raise InvalidActionError("episode already answered")
-
-
-def _torch_dtype(torch: object, dtype: str):
-    normalized = str(dtype).lower()
-    if normalized in {"fp16", "float16", "half"}:
-        return torch.float16
-    if normalized in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp32", "float32", "no"}:
-        return torch.float32
-    raise ValueError(f"unsupported dtype: {dtype}")
 
 
 def _move_text_encoders(pipeline: Any, device: str) -> None:

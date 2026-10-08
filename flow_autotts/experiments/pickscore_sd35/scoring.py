@@ -22,7 +22,7 @@ class PickScoreBatchScorer:
 
         self.torch = torch
         self.device = device
-        self.dtype = _torch_dtype(torch, dtype)
+        self.dtype = torch_dtype(torch, dtype)
         if str(device).startswith("cpu") and self.dtype in {torch.float16, torch.bfloat16}:
             self.dtype = torch.float32
         model_name = str(model_path)
@@ -80,7 +80,7 @@ class PickScoreBatchScorer:
         return features
 
 
-def _torch_dtype(torch: object, dtype: str):
+def torch_dtype(torch: object, dtype: str):
     normalized = str(dtype).lower()
     if normalized in {"fp16", "float16", "half"}:
         return torch.float16

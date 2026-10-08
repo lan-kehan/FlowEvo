@@ -220,7 +220,7 @@ def build_context_pack(
         "",
         "## Allowed First-Pass Reads",
         "",
-        "- `flow_tts_controller_implementation_spec.md`",
+        "- `docs/controller_spec.md`",
         f"- `{method_file}`",
         "- `flow_autotts/controllers/baselines.py`",
         "- `flow_autotts/core/state.py`",

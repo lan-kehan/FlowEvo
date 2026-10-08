@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 
-def write_history(round_result: dict[str, Any], path: str | Path) -> None:
+def write_json(payload: Any, path: str | Path) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(round_result, indent=2, sort_keys=True), encoding="utf-8")
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def pareto_frontier(

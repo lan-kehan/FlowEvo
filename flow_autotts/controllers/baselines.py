@@ -7,8 +7,13 @@ from flow_autotts.core.errors import BudgetExceededError
 from flow_autotts.core.state import AnswerRecord
 
 
+def clamp_beta(beta: float) -> float:
+    return min(max(float(beta), 0.0), 1.0)
+
+
 def map_beta(beta: float) -> dict[str, float | int]:
-    beta = min(max(float(beta), 0.0), 1.0)
+    """Shared beta -> compute-knob schedule used by the hand-written baselines."""
+    beta = clamp_beta(beta)
     return {
         "max_particles": int(2 + 14 * beta),
         "max_preview_calls": int(2 + 12 * beta),
@@ -20,7 +25,16 @@ def map_beta(beta: float) -> dict[str, float | int]:
     }
 
 
+def _affordable_full_rollouts(env: FlowTTSEnv, requested: int) -> int:
+    """Number of full Euler rollouts plus one final preview that fit the budget."""
+    per_particle_cost = max(1, len(env.time_grid) - 1) + 1
+    affordable = max(1, env.budget // per_particle_cost)
+    return min(requested, affordable)
+
+
 class DeterministicController:
+    """Single deterministic Euler trajectory; ignores beta."""
+
     def solve(self, env: FlowTTSEnv, beta: float) -> AnswerRecord:
         particle_id = env.spawn(1)[0]
         for target_time in env.time_grid[1:]:
@@ -29,11 +43,10 @@ class DeterministicController:
 
 
 class BestOfNController:
+    """Independent Euler rollouts, answer with the best-scoring final sample."""
+
     def solve(self, env: FlowTTSEnv, beta: float) -> AnswerRecord:
-        requested = int(map_beta(beta)["max_particles"])
-        per_particle_cost = max(1, len(env.time_grid) - 1) + 1
-        affordable = max(1, env.budget // per_particle_cost)
-        n = min(requested, affordable)
+        n = _affordable_full_rollouts(env, int(map_beta(beta)["max_particles"]))
         ids = env.spawn(n)
 
         for particle_id in ids:
@@ -48,11 +61,8 @@ class SDEForwardController:
     """Best-of-N controller using Flow-GRPO-style SDE forward steps."""
 
     def solve(self, env: FlowTTSEnv, beta: float) -> AnswerRecord:
-        beta = min(max(float(beta), 0.0), 1.0)
-        requested = int(2 + 14 * beta)
-        per_particle_cost = max(1, len(env.time_grid) - 1) + 1
-        affordable = max(1, env.budget // per_particle_cost)
-        n = min(requested, affordable)
+        beta = clamp_beta(beta)
+        n = _affordable_full_rollouts(env, int(map_beta(beta)["max_particles"]))
         noise_scale = self._noise_scale(beta)
         ids = env.spawn(n)
 
@@ -80,9 +90,10 @@ class SDEForwardController:
 
 
 class SelfRefineController:
+    """Predict-and-perturb style refinement of a single early trajectory."""
+
     def solve(self, env: FlowTTSEnv, beta: float) -> AnswerRecord:
-        beta = min(max(float(beta), 0.0), 1.0)
-        refinement_rounds = int(1 + 3 * beta)
+        refinement_rounds = int(1 + 3 * clamp_beta(beta))
         particle_id = env.spawn(1)[0]
 
         for target_time in env.time_grid[1:]:
@@ -107,6 +118,8 @@ class SelfRefineController:
 
 
 class PrismStyleFlowController:
+    """Warm up many roots, keep the best previews, re-noise and finish children."""
+
     def solve(self, env: FlowTTSEnv, beta: float) -> AnswerRecord:
         params = map_beta(beta)
         warm_target = float(params["mid_time"])
@@ -164,7 +177,6 @@ class PrismStyleFlowController:
         if not child_ids:
             return env.answer(rule="best_preview_score")
 
-        finished: list[int] = []
         for particle_id in child_ids:
             needed = len([t for t in finish_grid if t > warm_target])
             if env.budget_left < needed + 1:
@@ -174,10 +186,7 @@ class PrismStyleFlowController:
                     if env.get_state().particles[particle_id].status == "active":
                         env.forward(particle_id, target_time=target_time, solver="euler")
                 env.preview(particle_id, scorer="default")
-                finished.append(particle_id)
             except BudgetExceededError:
                 break
 
-        if not finished:
-            return env.answer(rule="best_preview_score")
         return env.answer(rule="best_preview_score")

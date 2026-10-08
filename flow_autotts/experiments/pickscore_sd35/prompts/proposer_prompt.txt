@@ -1,7 +1,7 @@
 You are an explorer for training-free flow-matching test-time scaling controller discovery.
 
 You are working in the FlowEvo repository. Read the implementation spec first:
-- `flow_tts_controller_implementation_spec.md`
+- `docs/controller_spec.md`
 
 Read the workflow context pack immediately after the spec:
 - `{context_file}`

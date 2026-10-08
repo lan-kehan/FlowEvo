@@ -1,17 +1,21 @@
+# Python
 .venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-outputs/
-checkpoints/
-PickScore_v1/
-logs/
-flow_grpo/
-SD_3.5_med/
-fill_gpu.py
 .cache/
-._____temp/
-AutoTTS/
+
+# Model weights, datasets and run artifacts (downloaded / generated locally)
+SD_3.5_med/
+PickScore_v1/
 flow_grpo/
+AutoTTS/
+checkpoints/
+outputs/
+logs/
+
+# Local scratch
+fill_gpu.py
+._____temp/

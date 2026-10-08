@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, dataclass
+from statistics import mean
 from typing import Any
 
 from flow_autotts.core.state import AnswerRecord, EventRecord
@@ -26,7 +27,11 @@ class EvalMetrics:
 def compute_metrics(answer: AnswerRecord) -> EvalMetrics:
     events = answer.event_log
     counts = Counter(event.action for event in events)
-    spawned = sum(int(event.details.get("n", len(event.particle_ids))) for event in events if event.action == "SPAWN")
+    spawned = sum(
+        int(event.details.get("n", len(event.particle_ids)))
+        for event in events
+        if event.action == "SPAWN"
+    )
     reward_per_nfe = None
     if answer.reward is not None and answer.nfe_used > 0:
         reward_per_nfe = answer.reward / answer.nfe_used
@@ -46,3 +51,37 @@ def compute_metrics(answer: AnswerRecord) -> EvalMetrics:
 
 def event_log_to_dicts(events: list[EventRecord]) -> list[dict[str, Any]]:
     return [asdict(event) for event in events]
+
+
+def summarize_episodes(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Average reward / NFE metrics and action counts over evaluated episodes.
+
+    Each episode must carry a ``metrics`` dict produced by ``compute_metrics``.
+    """
+
+    metrics = [episode["metrics"] for episode in episodes]
+    rewards = [m["final_reward"] for m in metrics if m["final_reward"] is not None]
+    reward_per_nfes = [m["reward_per_nfe"] for m in metrics if m["reward_per_nfe"] is not None]
+    nfes = [m["nfe"] for m in metrics]
+    return {
+        "final_reward": mean(rewards) if rewards else None,
+        "nfe": mean(nfes) if nfes else 0.0,
+        "reward_per_nfe": mean(reward_per_nfes) if reward_per_nfes else None,
+        "action_statistics": aggregate_action_statistics(episodes),
+    }
+
+
+def aggregate_action_statistics(episodes: list[dict[str, Any]]) -> dict[str, float]:
+    """Mean per-episode count of each action, plus ``mean_nfe``."""
+
+    if not episodes:
+        return {}
+    totals: Counter[str] = Counter()
+    total_nfe = 0
+    for episode in episodes:
+        metrics = episode["metrics"]
+        total_nfe += int(metrics["nfe"])
+        totals.update({action: int(count) for action, count in metrics["action_counts"].items()})
+    stats = {action.lower(): count / len(episodes) for action, count in sorted(totals.items())}
+    stats["mean_nfe"] = total_nfe / len(episodes)
+    return stats
